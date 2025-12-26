@@ -1,3 +1,8 @@
+/* 
+ * mpad - vi-like screen-oriented text editor
+ * Miro Haapalainen
+ */
+
 #include <termios.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -6,12 +11,15 @@
 #include <unistd.h>
 #include <string.h>
 
-#define DEFAULT_BUF_LEN 4096
-#define ESC 27
+#define DEFAULT_BUF_LEN 4096 	// Text buffer starts at size 4k
+#define ESC 27 			// Escape key control char
+#define CURSOR_BUF_LEN 32	// Slightly arbitrary but whatever
 
 struct termios orig_termios;
 
-char* screen_buf;
+char* screen_buf;		  	      // Buffer for chars on screen
+size_t cur_screen_buf_offset = 0; 	      // How many chars are currently in buf
+size_t cur_screen_buf_len = DEFAULT_BUF_LEN;  // Total current dynamic size of buf
 
 void disable_raw_mode() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
@@ -56,7 +64,6 @@ void move_cursor(int row, int col) {
     char cursor_buf[32];
     int len = snprintf(cursor_buf, sizeof(cursor_buf), "\x1b[%d;%dH", row, col);
     write(STDOUT_FILENO, cursor_buf, len);
-
 }
 
 void clear_line() {
@@ -80,11 +87,33 @@ void draw_status_line(const char *status) {
 
 }
 
+// vi-style editor modes. It's what I'm used to and it's
+// my editor >:)
 enum Mode {
     NORMAL,
     INSERT,
     COMMAND
 };
+
+// Write inputted char to screen and save to screen buffer
+void write_input(const char *q) {
+    write(STDOUT_FILENO, c, 1);
+
+    // Do we need to resize the buffer?
+    if (cur_screen_buf_offset == cur_screen_buf_len) {
+        size_t new_size = 2*cur_screen_buf_len;
+	char *new_buf = realloc(screen_buf, new_size);
+	
+	if (new_buf == NULL) {
+	    perror("screen buffer realloc");
+	    exit(1);
+	} else {
+	    screen_buf = new_buf;
+	}
+    }
+
+    screen_buf[cur_screen_buf_offset++] = q;
+}
 
 int main() {
     char c;
@@ -107,7 +136,7 @@ int main() {
 	        if (c == ESC) {
 		    cur_mode = NORMAL;
 		} else {
-		    write(STDOUT_FILENO, &c, 1);
+		    write_input(&q);
 		}
 	    } else if (cur_mode == NORMAL) {
 		if (c == 'i') {
@@ -117,8 +146,11 @@ int main() {
 		} else if (c == ESC) {
 		    cur_mode = NORMAL;
 		}
-	    } else {
-	    	
+	    } else if (cur_mode == COMMAND) {
+	        if (c == 'q') {
+		    clear_screen();
+		    break;
+		}
 	    }
 	}
     }
