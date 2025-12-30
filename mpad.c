@@ -15,7 +15,10 @@
 
 #define DEFAULT_BUF_CAP 128 	// Default buffer line count
 #define DEFAULT_LINE_CAP 16 	// Default (empty) line cap
-#define ESC 27 			// Escape key control char
+#define ESC 27 
+#define ENTER 13
+#define BACKSPACE 8
+#define TAB 9
 #define CURSOR_BUF_LEN 32	// Slightly arbitrary but whatever
 
 typedef struct {
@@ -202,10 +205,23 @@ void move_cursor(int row, int col) {
     char cursor_buf[32];
     int len = snprintf(cursor_buf, sizeof(cursor_buf), "\x1b[%d;%dH", row, col);
     write(STDOUT_FILENO, cursor_buf, len);
+
+    global_cursor.row = row;
+    global_cursor.col = col;
 }
 
 void clear_line() {
     write(STDOUT_FILENO, "\x1b[2K", 4);
+}
+
+void move_cursor_to_status_line() {
+    int rows, cols;
+    if (get_window_size(&rows, &cols) == -1) {
+        return;
+    }
+
+    write(STDOUT_FILENO, "\x1b[s", 3);
+    move_cursor(rows, 2);
 }
 
 void draw_status_line(const char *status) {
@@ -335,6 +351,8 @@ int main(int argc, char *argv[]) {
 
     draw_status_line(file_status_line);
 
+    char cmd_buf = '\0';
+
     while (1) {
 	if (read(STDIN_FILENO, &c, 1) == 1) {
 	    if (cur_mode == INSERT) {
@@ -353,14 +371,33 @@ int main(int argc, char *argv[]) {
 		} else if (c == ':') {
 		    cur_mode = COMMAND;
 		    draw_status_line(":");
+		    move_cursor_to_status_line();
 		} else if (c == ESC) {
 		    cur_mode = NORMAL;
 		    draw_status_line(" ");
 		}
 	    } else if (cur_mode == COMMAND) {
-	        if (c == 'q') {
-		    clear_screen();
-		    break;
+		if (cmd_buf == '\0') {
+		    write(STDOUT_FILENO, &c, 1);
+		    cmd_buf = c;
+		}
+
+	        if (c == ENTER) {
+		    if (cmd_buf == 'q') {
+		        clear_screen();
+			break;
+		    } else {
+		        draw_status_line("Unknown command");
+			cmd_buf = '\0';
+			cur_mode = NORMAL;
+		    }
+		} else if (c == BACKSPACE) {
+		    draw_status_line(":  ");
+		    cmd_buf = '\0';
+		} else if (c == ESC) {
+		    cur_mode = NORMAL;
+		    cmd_buf = '\0';
+		    draw_status_line(" ");
 		}
 	    }
 	}
