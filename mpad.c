@@ -21,6 +21,14 @@
 #define TAB 9
 #define CURSOR_BUF_LEN 32	// Slightly arbitrary but whatever
 
+/* 
+ * To be clear on the nomenclature, the values stored in
+ * these buffer structures (i.e. the line number and the
+ * position of a character in said line) are sometimes referred
+ * to in the code as virtual positions. Where the actual character
+ * is printed on the screen is the physical position
+ */
+
 typedef struct {
     char *data;
     size_t len;
@@ -37,6 +45,14 @@ typedef struct {
     size_t row;
     size_t col;
 } Cursor;
+
+
+// The current window/viewport of
+// the text editor; i.e. what is the topmost
+// visible row?
+typedef struct {
+    int top_line;
+} CurrentView;
 
 Buffer global_buffer;
 
@@ -241,6 +257,16 @@ void draw_status_line(const char *status) {
 
 }
 
+// Takes a virtual x and y and returns the physical position
+// on the screen it can be printed to
+void virtual_to_physical_pos(int in_x, int in_y, int *out_x, int *out_y) {
+    int winsize_x, winsize_y;
+    if (get_window_size(&winsize_x, &winsize_y) == -1) {
+        return;
+    }
+    
+}
+
 // vi-style editor modes. It's what I'm used to and it's
 // my editor >:)
 enum Mode {
@@ -253,7 +279,11 @@ enum Mode {
 void write_input_at_pos(char *c, int row, int col) {
     move_cursor(row, col);
 
+    // TODO - implement virtual buffer -> physical screen pos algorithm
 
+    Line *l = global_buffer.lines[]
+
+    line_insert_char(
 
     write(STDOUT_FILENO, c, 1);
 
@@ -265,7 +295,7 @@ void insert_newline() {
     char carriage_return = '\r';
     char newline = '\n';
     write(STDOUT_FILENO, &carriage_return, 1);
-    write_input(&newline);
+    
 }
 
 void write_file_content_initial(Buffer *b) {
