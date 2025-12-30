@@ -343,7 +343,6 @@ int main(int argc, char *argv[]) {
         printf("Invalid number of args\n");
 	return 1;
     } 
-
     enable_raw_mode();
     clear_screen();
 
