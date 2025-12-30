@@ -250,7 +250,11 @@ enum Mode {
 };
 
 // Write inputted char to screen and save to screen buffer
-void write_input(char *c) {
+void write_input_at_pos(char *c, int row, int col) {
+    move_cursor(row, col);
+
+
+
     write(STDOUT_FILENO, c, 1);
 
     
