@@ -106,6 +106,8 @@ static char *global_filename_owned = NULL;
 
 static enum Mode global_mode = NORMAL;
 
+static char global_control_char = ' ';
+
 // Dirty bit - buffer has been modified
 // but not yet synced with file
 static bool global_dirty = false;
@@ -837,12 +839,13 @@ static void editor_draw_status_bar(struct abuf *ab, int screen_cols) {
         const char *mode = (global_mode == INSERT) ? "INSERT" : "NORMAL";
         const char *fname = global_filename ? global_filename : "[No Name]";
         snprintf(left, sizeof(left),
-                "\"%s\"%s  %s  Ln %zu, Col %zu",
+                "\"%s\"%s  %s  Ln %zu, Col %zu                    %c",
                 fname,
                 global_dirty ? " [+]" : "",
                 mode,
                 global_cursor.row + 1,
-                global_cursor.col + 1);
+                global_cursor.col + 1,
+                global_control_char);
     }
 
     abAppend(ab, "\x1b[7m", 4);
@@ -1122,6 +1125,24 @@ static void editor_process_keypress(void) {
     if (key == 'j') { editor_move_cursor(ARROW_DOWN); return; }
     if (key == 'k') { editor_move_cursor(ARROW_UP); return; }
     if (key == 'l') { editor_move_cursor(ARROW_RIGHT); return; }
+
+	if (key == 'x') { 
+		line_delete_char(&global_buffer.lines[global_cursor.row], global_cursor.col);
+		return;
+	}
+
+    if (key == 'd') {
+        global_control_char = 'd';
+        editor_refresh_screen();
+        int other_key = editor_read_key();
+        if (other_key == 'd') {
+            global_control_char = ' ';
+            buffer_delete_line(&global_buffer, global_cursor.row);
+        } else {
+            global_control_char = ' ';
+            return;
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
