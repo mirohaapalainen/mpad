@@ -1031,8 +1031,17 @@ static void editor_execute_command(void) {
         if (dump_buffer_to_file(&global_buffer, global_filename) == 0) {
             editor_running = false;
         }
-    } else {
-        snprintf(global_status, sizeof(global_status), "Unknown command: %s", cmd);
+	} else {
+		char *endptr;
+		strtol(cmd, &endptr, 10);
+
+		if (*endptr == '\0') {
+			global_cursor.row = atoi(cmd);
+			global_cursor.col = 1;
+            editor_refresh_screen();
+		} else {
+            snprintf(global_status, sizeof(global_status), "Unknown command: %s", cmd);
+        }            
     }
 
     editor_leave_command_mode();
