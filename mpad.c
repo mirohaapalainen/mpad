@@ -62,6 +62,10 @@ typedef struct {
     char *data;
     size_t len;
     size_t cap;
+
+	unsigned char *hl;
+	size_t hl_cap;
+	bool hl_open_comment;
 } Line;
 
 typedef struct {
@@ -69,6 +73,26 @@ typedef struct {
     size_t line_count;
     size_t cap;
 } Buffer;
+
+/* For syntax highlighting */
+enum Highlight {
+	HL_NORMAL = 0,
+	HL_COMMENT,
+	HL_MLCOMMENT,
+	HL_STRING,
+	HL_NUMBER,
+	HL_KEYWORD
+};
+
+static const char *C_KEYWORDS[] = {
+    "if","else","for","while","do","switch","case","default","break","continue","return",
+    "struct","typedef","enum","union",
+    "static","const","volatile","extern","inline",
+    "void","char","short","int","long","float","double","signed","unsigned","size_t","bool",
+    "NULL",
+    NULL
+};
+
 
 /* -------- globals --------- */
 
@@ -175,7 +199,10 @@ static void line_append_bytes(Line *l, const char *s, size_t n) {
 
 static void buffer_free(Buffer *b) {
     if (!b->lines) return;
-    for (size_t i = 0; i < b->line_count; i++) free(b->lines[i].data);
+    for (size_t i = 0; i < b->line_count; i++) {
+        free(b->lines[i].data);
+        free(b->lines[i].hl); 
+    }
     free(b->lines);
     b->lines = NULL;
     b->line_count = 0;
@@ -249,6 +276,7 @@ static void buffer_delete_line(Buffer *b, size_t row) {
     }
 
     free(b->lines[row].data);
+    free(b->lines[row].hl);
     memmove(&b->lines[row], &b->lines[row + 1], (b->line_count - row - 1) * sizeof(Line));
     b->line_count--;
 }
@@ -428,6 +456,153 @@ static int editor_read_key(void) {
     return (unsigned char)c;
 }
 
+/* ------ syntax highlighting ------ */
+
+static int hl_to_ansi(enum Highlight hl) {
+    switch (hl) {
+		case HL_COMMENT:      return 90; // gray
+		case HL_MLCOMMENT:    return 90; // gray
+		case HL_STRING:       return 32; // green
+		case HL_NUMBER:       return 36; // cyan
+		case HL_KEYWORD:      return 33; // yellow
+		default: 			  return 39; // default fg		
+	}
+}
+
+static bool is_separator(int c) {
+    unsigned char uc = (unsigned char)c;
+    return isspace(uc) || c == '\0' ||
+           strchr(",.()+-/*=~%<>[]{};:&|^!?", uc) != NULL;
+}
+static bool filename_is_c_like(const char *fn) {
+    if (!fn) return false;
+    const char *dot = strrchr(fn, '.');
+    if (!dot) return false;
+    return strcmp(dot, ".c") == 0 || strcmp(dot, ".h") == 0 || strcmp(dot, ".cpp") == 0 ||
+        strcmp(dot, ".hpp") == 0;
+}
+
+// Computes l->hl[i] and whether the line ends inside multiline comment
+static void line_hl_reserve(Line *l, size_t needed) {
+    if (needed <= l->hl_cap) return;
+    size_t cap = (l->hl_cap == 0) ? 16 : l->hl_cap;
+    while (cap < needed) cap *= 2;
+    unsigned char *p = realloc(l->hl, cap);
+    if (!p) die("realloc");
+    l->hl = p;
+    l->hl_cap = cap;
+}
+
+static bool is_keyword(const char *s, size_t len) {
+    for (int k = 0; C_KEYWORDS[k]; k++) {
+        if (strlen(C_KEYWORDS[k]) == len && memcmp(C_KEYWORDS[k], s, len) == 0) return true;
+    }
+    return false;
+}
+
+static bool editor_update_syntax_line(size_t row, bool in_comment) {
+    Line *l = &global_buffer.lines[row];
+    line_hl_reserve(l, l->len);
+    memset(l->hl, HL_NORMAL, l->len);
+
+    size_t i = 0;
+    while (i < l->len) {
+        char c = l->data[i];
+
+        if (in_comment) {
+            l->hl[i] = HL_MLCOMMENT;
+            if (c == '*' && i + 1 < l->len && l->data[i+1] == '/') {
+                l->hl[i] = HL_MLCOMMENT;
+                l->hl[i+1] = HL_MLCOMMENT;
+                i += 2;
+                in_comment = false;
+                continue;
+            }
+            i++;
+            continue;
+        }
+
+        if (c == '/' && i + 1 < l->len && l->data[i+1] == '/') {
+            for (size_t j = i; j < l->len; j++) l->hl[j] = HL_COMMENT;
+            break;
+        }
+
+        if (c == '/' && i + 1 < l->len && l->data[i + 1] == '*') {
+            l->hl[i] = HL_MLCOMMENT;
+            l->hl[i+1] = HL_MLCOMMENT;
+            i += 2;
+            in_comment = true;
+            continue;
+        }
+
+        if (c == '"' || c == '\'') {
+            char quote = c;
+            l->hl[i++] = HL_STRING;
+            while (i < l->len) {
+                l->hl[i] = HL_STRING;
+                if (l->data[i] == '\\' && i+1 < l->len) {
+                    l->hl[i+1] = HL_STRING;
+                    i += 2;
+                    continue;
+                }
+                if (l->data[i] == quote) {i++; break;}
+                i++;
+            }
+            continue;
+        }
+
+        if (isdigit((unsigned char)c) && (i == 0 || is_separator(l->data[i-1]))) {
+            size_t j = i;
+            while (j < l->len && (isdigit((unsigned char)l->data[j]) || l->data[j]=='.')) {
+                l->hl[j] = HL_NUMBER;
+                j++;
+            }
+            i = j;
+            continue;
+        }
+
+        if (isalpha((unsigned char)c) || c == '_') {
+            size_t start = i;
+            size_t j = i;
+            while (j < l->len && (isalnum((unsigned char)l->data[j]) || l->data[j]=='_')) j++; 
+            bool kw = is_keyword(&l->data[start], j - start);
+            if (kw && (start == 0 || is_separator(l->data[start - 1])) &&
+                (j == l->len || is_separator(l->data[j]))) {
+                    for (size_t k = start; k < j; k++) l->hl[k] = HL_KEYWORD;
+                }
+
+                i = j;
+                continue;
+        }
+        i++;
+    }
+    bool changed = (l->hl_open_comment != in_comment);
+    l->hl_open_comment = in_comment;
+    return changed;
+}
+
+static void editor_update_syntax_from(size_t start_row) {
+    if (!filename_is_c_like(global_filename)) return;
+    if (start_row >= global_buffer.line_count) return;
+
+    bool in_comment = false;
+    if (start_row > 0) in_comment = global_buffer.lines[start_row - 1].hl_open_comment;
+
+    for (size_t r = start_row; r < global_buffer.line_count; r++) {
+        bool prev_open = global_buffer.lines[r].hl_open_comment;
+
+        editor_update_syntax_line(r, in_comment);
+        in_comment = global_buffer.lines[r].hl_open_comment;
+
+        bool next_missing = (r + 1 < global_buffer.line_count) &&
+                            (global_buffer.lines[r + 1].hl == NULL);
+
+        if (global_buffer.lines[r].hl_open_comment == prev_open && !next_missing) {
+            break;
+        }
+    }
+}
+
 /* ------ screen mapping/render helpers ------- */
 
 // How many terminal columns does this prefix of the
@@ -556,6 +731,51 @@ static void editor_scroll_to_cursor(void) {
 
 /* ----- rendering ----- */
 
+static void editor_append_wrapped_slice_hl(struct abuf *ab, const Line *l, int text_cols, size_t wrap_row) {
+    int start_v = (int)(wrap_row * (size_t)text_cols);
+    int end_v   = start_v + text_cols;
+
+    int v = 0;
+    int cur_color = 39;
+
+    for (size_t i = 0; i < l->len; i++) {
+        unsigned char hl = (l->hl && i < l->len) ? l->hl[i] : HL_NORMAL;
+        int color = hl_to_ansi((enum Highlight)hl);
+
+        if (l->data[i] == '\t') {
+            int spaces = TAB_WIDTH - (v % TAB_WIDTH);
+            for (int s = 0; s < spaces; s++) {
+                if (v >= start_v && v < end_v) {
+                    if (color != cur_color) {
+                        char buf[16];
+                        int n = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                        abAppend(ab, buf, n);
+                        cur_color = color;
+                    }
+                    abAppend(ab, " ", 1);
+                }
+                v++;
+                if (v >= end_v) goto done;
+            }
+        } else {
+            if (v >= start_v && v < end_v) {
+                if (color != cur_color) {
+                    char buf[16];
+                    int n = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                    abAppend(ab, buf, n);
+                    cur_color = color;
+                }
+                abAppend(ab, &l->data[i], 1);
+            }
+            v++;
+            if (v >= end_v) break;
+        }
+    }
+
+done:
+    if (cur_color != 39) abAppend(ab, "\x1b[39m", 5); // reset to default fg
+}
+
 static void editor_append_wrapped_slice(struct abuf *ab, const Line *l, int screen_cols, size_t wrap_row) {
     int start_v = (int)(wrap_row * (size_t)screen_cols);
     int end_v = start_v + screen_cols;
@@ -589,7 +809,7 @@ static void editor_draw_rows(struct abuf *ab, int text_rows, int screen_cols) {
         } else {
             Line *l = &global_buffer.lines[line_idx];
         
-            editor_append_wrapped_slice(ab, l, screen_cols, rowoff);
+            editor_append_wrapped_slice_hl(ab, l, screen_cols, rowoff);
 
             int rows_in_line = screen_rows_for_line(l, screen_cols);
             if (rowoff + 1 < (size_t)rows_in_line) {
@@ -718,11 +938,14 @@ static void editor_insert_char(char c) {
     line_insert_char(l, global_cursor.col, c);
     global_cursor.col++;
     global_dirty = true;
+    editor_update_syntax_from(global_cursor.row);
 }
 
 static void editor_insert_newline(void) {
+    size_t start = global_cursor.row;
     buffer_split_line(&global_buffer, &global_cursor);
     global_dirty = true;
+    editor_update_syntax_from(start);
 }
 
 static void editor_backspace(void) {
@@ -733,14 +956,34 @@ static void editor_backspace(void) {
         line_delete_char(l, global_cursor.col - 1);
         global_cursor.col--;
         global_dirty = true;
+        editor_update_syntax_from(global_cursor.row > 0 ? global_cursor.row - 1 : 0);
         return;
     }
 
     if (global_cursor.row > 0) {
         buffer_join_line_with_prev(&global_buffer, &global_cursor);
         global_dirty = true;
+        editor_update_syntax_from(global_cursor.row > 0 ? global_cursor.row - 1 : 0);
     }
 }
+
+// static void editor_backspace(void) {
+//     size_t start = global_cursor.row;
+//     if (global_cursor.row >= global_buffer.line_count) return;
+
+//     if (global_cursor.col > 0) {
+//         Line *l = &global_buffer.lines[global_cursor.row];
+//         line_delete_char(l, global_cursor.col - 1);
+//         global_cursor.col--;
+//         global_dirty = true;
+//         editor_update_syntax_from(start > 0 ? start - 1 : 0);
+//     }
+
+//     if (global_cursor.row > 0) {
+//         buffer_join_line_with_prev(&global_buffer, &global_cursor);
+//         global_dirty = true;
+//     }
+// }
 
 /* ------ command mode ------ */
 
@@ -772,7 +1015,7 @@ static void editor_execute_command(void) {
         editor_running = false;
     } else if (strcmp(cmd, "w") == 0) {
         dump_buffer_to_file(&global_buffer, global_filename);
-    } else if (strncmp(cmd, "w", 2) == 0) {
+    } else if (strncmp(cmd, "w ", 2) == 0) {
         cmd += 2;
         while (*cmd == ' ') cmd++;
         if (*cmd == '\0') {
@@ -881,6 +1124,7 @@ int main(int argc, char *argv[]) {
         if (fp) {
             buffer_load_file(&global_buffer, fp);
             global_dirty = false;
+            editor_update_syntax_from(0);
         } else {
             global_dirty = false;
             snprintf(global_status, sizeof(global_status), "New file");
@@ -908,154 +1152,3 @@ int main(int argc, char *argv[]) {
     free(global_filename_owned);
     return 0;
 }
-
-// void term_move_cursor(int row, int col);
-
-// static void virtual_to_physical_pos(size_t logical_row, size_t logical_col, int *phys_row, int *phys_col);
-// static void write_input(char *c);
-// static void write_input_at_pos(char c, size_t logical_row, size_t logical_col);
-
-// static void editor_place_terminal_cursor(void) {
-//     int rows, cols;
-//     if (get_window_size(&rows, &cols) == -1) return;
-//     int text_rows = rows - 1;
-
-//     int r, c;
-//     if (!buffer_to_screen(&global_buffer, global_cursor.row, global_cursor.col, &global_view, cols, text_rows, &r, &c)) {
-//         editor_scroll_to_cursor();
-//         buffer_to_screen(&global_buffer, global_cursor.row, global_cursor.col, &global_view, cols, text_rows, &r, &c);
-//     }
-
-//     term_move_cursor(r+1, c+1);
-// }
-
-// void clear_screen() {
-//     write(STDOUT_FILENO, "\x1b[2J", 4);
-//     write(STDOUT_FILENO, "\x1b[H", 3);
-// }
-
-// void draw_str(char* str, size_t len) {
-//     clear_screen();
-//     write(STDOUT_FILENO, str, len);
-// }
-
-// void term_move_cursor(int row, int col) {
-//     char cursor_buf[32];
-//     int len = snprintf(cursor_buf, sizeof(cursor_buf), "\x1b[%d;%dH", row, col);
-//     write(STDOUT_FILENO, cursor_buf, len);
-// }
-
-// void clear_line() {
-//     write(STDOUT_FILENO, "\x1b[2K", 4);
-// }
-
-// void move_cursor_to_status_line() {
-//     int rows, cols;
-//     if (get_window_size(&rows, &cols) == -1) {
-//         return;
-//     }
-
-//     write(STDOUT_FILENO, "\x1b[s", 3);
-//     term_move_cursor(rows, 2);
-// }
-
-// void draw_status_line(const char *status) {
-//     int rows, cols;
-//     if (get_window_size(&rows, &cols) == -1) {
-//         return;
-//     }
-
-//     write(STDOUT_FILENO, "\x1b[s", 3);
-
-//     term_move_cursor(rows, 1);
-
-//     clear_line();
-//     write(STDOUT_FILENO, status, strlen(status));
-
-//     write(STDOUT_FILENO, "\x1b[u", 3);
-
-// }
-
-// static void write_input(char *c) {
-//     write_input_at_pos(*c, global_cursor.row, global_cursor.col);
-//     global_cursor.col++;
-
-//     editor_scroll_to_cursor();
-//     editor_place_terminal_cursor();
-// }
-
-// static void logical_to_physical_pos(size_t logical_row, size_t logical_col, int *phys_row, int *phys_col) {
-//     int rows, cols;
-//     if (get_window_size(&rows, &cols) == -1) {
-//         *phys_row = 1;
-//         *phys_col = 1;
-//         return;
-//     }
-
-//     int text_rows = rows - 1;
-
-//     int r, c;
-//     if (!buffer_to_screen(&global_buffer, logical_row, logical_col, &global_view, cols, text_rows, &r, &c)) {
-//         int cr, cc;
-//         buffer_to_screen_unclipped(&global_buffer, logical_row, logical_col, &global_view, cols, &cr, &cc);
-
-//         int delta = 0;
-//         if (cr < 0) delta = cr;
-//         else if (cr >= text_rows) delta = cr - (text_rows - 1);
-
-//         if (delta != 0) view_scroll_by_rows(&global_view, &global_buffer, cols, delta);
-
-//         buffer_to_screen(&global_buffer, logical_row, logical_col, &global_view, cols, text_rows, &r, &c);
-//     }
-
-//     *phys_row = r + 1;
-//     *phys_col = c + 1;
-// }
-
-// // Write inputted char to screen and save to screen buffer
-// void write_input_at_pos(char c, size_t logical_row, size_t logical_col) {
-
-//     if (logical_row >= global_buffer.line_count) return;
-
-//     Line *l = &global_buffer.lines[logical_row];
-//     if (logical_row > l->len) logical_col = l->len;
-
-//     line_insert_char(l, logical_col, c);
-
-//     int pr, pc;
-//     logical_to_physical_pos(logical_row, logical_col, &pr, &pc);
-//     term_move_cursor(pr, pc);
-//     write(STDOUT_FILENO, &c, 1);
-// }
-
-// void insert_newline() {
-//     char carriage_return = '\r';
-//     char newline = '\n';
-//     char empty[] = "";
-//     char *empty_ptr = empty;
-
-//     buffer_append_line(&global_buffer, &empty_ptr, 1);
-//     editor_move_cursor(ARROW_DOWN);
-// }
-
-// void write_file_content_initial(Buffer *b) {
-//     int rows, cols;
-
-//     get_window_size(&rows, &cols);
-
-//     for (size_t i = 0; i < b->line_count && i < (size_t)rows-2; i++) {
-//         write(STDOUT_FILENO, b->lines[i].data, b->lines[i].len);
-//         write(STDOUT_FILENO, "\r\n", 2);
-//     }
-// }
-
-// off_t get_file_size(const char* filename) {
-//     struct stat st;
-
-//     if (stat(filename, &st) == -1) {
-//         perror("Failed to stat file");
-// 	return -1;
-//     }
-
-//     return st.st_size;
-// }

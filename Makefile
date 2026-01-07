@@ -1,5 +1,5 @@
 mpad:
-	gcc -g -Wall -Wextra -pedantic mpad.c -o mpad
+	gcc -g -Wall -Wextra -pedantic mpad.c -o bin/mpad
 
 clean:
-	rm mpad
+	rm bin/mpad
