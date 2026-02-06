@@ -84,6 +84,14 @@ enum Highlight {
 	HL_KEYWORD
 };
 
+enum Language {
+    C,
+    PYTHON,
+    JAVA,
+    CPP,
+    CS
+};
+
 static const char *C_KEYWORDS[] = {
     "if","else","for","while","do","switch","case","default","break","continue","return",
     "struct","typedef","enum","union",
@@ -92,6 +100,85 @@ static const char *C_KEYWORDS[] = {
     "NULL",
     NULL
 };
+
+static const char *PYTHON_KEYWORDS[] = {
+    /* control flow */
+    "if","elif","else","for","while","break","continue","pass","return","yield",
+    "try","except","finally","raise","assert",
+    "with","as",
+
+    /* definitions */
+    "def","class","lambda",
+    "import","from","global","nonlocal",
+
+    /* logical */
+    "and","or","not","in","is",
+
+    /* literals */
+    "True","False","None",
+
+    NULL
+};
+
+static const char *JAVA_KEYWORDS[] = {
+    /* control flow */
+    "if","else","switch","case","default","for","while","do",
+    "break","continue","return","try","catch","finally","throw",
+
+    /* declarations */
+    "class","interface","enum","extends","implements","package","import",
+    "public","protected","private","static","final","abstract","synchronized","native","strictfp",
+
+    /* types */
+    "void","boolean","byte","short","int","long","float","double","char",
+
+    /* other */
+    "this","super","new","instanceof","null","true","false",
+
+    NULL
+};
+
+
+static const char *CPP_KEYWORDS[] = {
+    /* control flow */
+    "if","else","switch","case","default","for","while","do",
+    "break","continue","return","goto","try","catch","throw",
+
+    /* declarations */
+    "class","struct","union","enum","typedef","using","namespace",
+    "public","protected","private","virtual","override","final",
+    "static","const","constexpr","volatile","mutable","inline","extern",
+
+    /* types */
+    "void","bool","char","short","int","long","float","double","signed","unsigned","wchar_t",
+    "size_t","auto","decltype",
+
+    /* memory / operators */
+    "new","delete","this","nullptr",
+
+    NULL
+};
+
+
+static const char *CSHARP_KEYWORDS[] = {
+    /* control flow */
+    "if","else","switch","case","default","for","foreach","while","do",
+    "break","continue","return","try","catch","finally","throw",
+
+    /* declarations */
+    "class","struct","interface","enum","delegate","namespace","using",
+    "public","protected","private","internal","static","readonly","const","abstract","sealed","virtual","override",
+
+    /* types */
+    "void","bool","byte","sbyte","short","ushort","int","uint","long","ulong",
+    "float","double","decimal","char","string","object",
+
+    /* other */
+    "this","base","new","null","true","false","typeof","is","as",
+
+    NULL
+};
+
 
 
 /* -------- globals --------- */
@@ -476,12 +563,20 @@ static bool is_separator(int c) {
     return isspace(uc) || c == '\0' ||
            strchr(",.()+-/*=~%<>[]{};:&|^!?", uc) != NULL;
 }
+
 static bool filename_is_c_like(const char *fn) {
     if (!fn) return false;
     const char *dot = strrchr(fn, '.');
     if (!dot) return false;
     return strcmp(dot, ".c") == 0 || strcmp(dot, ".h") == 0 || strcmp(dot, ".cpp") == 0 ||
         strcmp(dot, ".hpp") == 0;
+}
+
+static bool filename_is_python_like(const char *fn) {
+    if (!fn) return false;
+    const char *dot = strrchr(fn, '.');
+    if (!dot) return false;
+    return strcmp(dot, ".py") == 0;
 }
 
 // Computes l->hl[i] and whether the line ends inside multiline comment
@@ -603,6 +698,17 @@ static void editor_update_syntax_from(size_t start_row) {
             break;
         }
     }
+}
+
+/* ------ line nums / gutter ------- */
+
+static int digits_size_t(size_t n) {
+    int d = 1;
+    while (n >= 10) {
+        n /= 10;
+        d++;
+    }
+    return d;
 }
 
 /* ------ screen mapping/render helpers ------- */
@@ -801,29 +907,62 @@ static void editor_append_wrapped_slice(struct abuf *ab, const Line *l, int scre
     }
 }
 
-static void editor_draw_rows(struct abuf *ab, int text_rows, int screen_cols) {
+static void editor_draw_rows(struct abuf *ab, int text_rows, int text_cols, int lnw) {
     size_t line_idx = global_view.top_line;
     size_t rowoff = global_view.top_rowoff;
 
     for (int y = 0; y < text_rows; y++) {
-        if (line_idx >= global_buffer.line_count) {
+
+        bool has_line = (line_idx < global_buffer.line_count);
+        bool first_wrap = (rowoff == 0);
+
+        char nb[64];
+        if (has_line && first_wrap) {
+            snprintf(nb, sizeof(nb), "%*zu", lnw, line_idx + 1);
+        } else {
+            snprintf(nb, sizeof(nb), "%*s", lnw, "");
+        }
+
+        abAppend(ab, "\x1b[96m", 5);
+        abAppend(ab, nb, (int)strlen(nb));
+        abAppend(ab, "  ", 2);
+        abAppend(ab, "\x1b[39m", 5);
+
+        if (!has_line) {
             abAppend(ab, "~", 1);
         } else {
             Line *l = &global_buffer.lines[line_idx];
-        
-            editor_append_wrapped_slice_hl(ab, l, screen_cols, rowoff);
+            editor_append_wrapped_slice_hl(ab, l, text_cols, rowoff);
 
-            int rows_in_line = screen_rows_for_line(l, screen_cols);
+            int rows_in_line = screen_rows_for_line(l, text_cols);
             if (rowoff + 1 < (size_t)rows_in_line) {
-                rowoff++;
-            } else {
-                line_idx++;
-                rowoff = 0;
+                rowoff++; 
+            } else { 
+                line_idx++; rowoff = 0;
             }
-        } 
-        
+        }
+
         abAppend(ab, "\x1b[K", 3);
         abAppend(ab, "\r\n", 2);
+
+        // if (line_idx >= global_buffer.line_count) {
+        //     abAppend(ab, "~", 1);
+        // } else {
+        //     Line *l = &global_buffer.lines[line_idx];
+        
+        //     editor_append_wrapped_slice_hl(ab, l, screen_cols, rowoff);
+
+        //     int rows_in_line = screen_rows_for_line(l, screen_cols);
+        //     if (rowoff + 1 < (size_t)rows_in_line) {
+        //         rowoff++;
+        //     } else {
+        //         line_idx++;
+        //         rowoff = 0;
+        //     }
+        // } 
+        
+        // abAppend(ab, "\x1b[K", 3);
+        // abAppend(ab, "\r\n", 2);
     }
 }
 
@@ -865,6 +1004,11 @@ static void editor_refresh_screen(void) {
     int rows, cols;
     if (get_window_size(&rows, &cols) == -1) return;
 
+    int lnw = digits_size_t(global_buffer.line_count); // number width
+    int gutter = lnw + 2; // " " + "|" (or " |")
+    int text_cols = cols - gutter;
+    if (text_cols < 1) text_cols = 1;
+
     int text_rows = rows - 1;
     if (text_rows < 1) text_rows = 1;
 
@@ -873,7 +1017,7 @@ static void editor_refresh_screen(void) {
     abAppend(&ab, "\x1b[?25l", 6);
     abAppend(&ab, "\x1b[H", 3);
 
-    editor_draw_rows(&ab, text_rows, cols);
+    editor_draw_rows(&ab, text_rows, cols, lnw);
     editor_draw_status_bar(&ab, cols);
 
     int r = 0, c = 0;
@@ -881,6 +1025,8 @@ static void editor_refresh_screen(void) {
         r = 0;
         c = 0;
     }
+
+    c += (lnw + 2);
 
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", r + 1, c + 1);
